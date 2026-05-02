@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "metacleaner",
-        "width": 800,
-        "height": 600
+        "title": "MetaCleaner",
+        "width": 820,
+        "height": 720,
+        "minWidth": 520,
+        "minHeight": 540
       }
     ],
     "security": {
