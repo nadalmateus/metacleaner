@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useI18n, type Locale } from "./i18n";
+
+const { locale, t, setLocale } = useI18n();
 
 interface CleanResult {
   output_path: string;
@@ -34,12 +37,7 @@ const reductionPct = computed(() => {
   return Math.max(0, Math.round((diff / result.value.original_size) * 100));
 });
 
-const strategyLabel: Record<string, string> = {
-  image: "Imagem",
-  pdf: "PDF",
-  "zip-office": "Office",
-  copy: "Cópia",
-};
+const strategyLabel = computed(() => t.value.strategy);
 
 async function pickFile() {
   error.value = "";
@@ -99,8 +97,19 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
         </svg>
       </div>
       <div class="leading-tight">
-        <h1 class="text-base font-semibold tracking-tight">MetaCleaner</h1>
-        <p class="text-xs text-[var(--color-muted)]">Remove metadados localmente</p>
+        <h1 class="text-base font-semibold tracking-tight">{{ t.appName }}</h1>
+        <p class="text-xs text-[var(--color-muted)]">{{ t.tagline }}</p>
+      </div>
+      <div class="ml-auto flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-0.5" role="group" :aria-label="t.languageLabel">
+        <button
+          v-for="lng in (['pt','en'] as Locale[])"
+          :key="lng"
+          @click="setLocale(lng)"
+          class="rounded-md px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider transition-colors"
+          :class="locale === lng
+            ? 'bg-[var(--color-accent)] text-white'
+            : 'text-[var(--color-muted)] hover:text-[var(--color-text)]'"
+        >{{ lng }}</button>
       </div>
     </header>
 
@@ -116,7 +125,7 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
       <Transition name="fade" mode="out-in">
         <div v-if="busy" key="busy" class="flex flex-col items-center gap-3 text-center">
           <div class="h-7 w-7 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-accent)]"></div>
-          <p class="text-sm font-medium">Limpando metadados…</p>
+          <p class="text-sm font-medium">{{ t.cleaning }}</p>
           <p class="max-w-[28rem] truncate text-xs text-[var(--color-muted)]">{{ fileName(selectedPath) }}</p>
         </div>
 
@@ -126,7 +135,7 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
               <path d="M5 12l5 5 9-10"/>
             </svg>
           </div>
-          <p class="text-sm font-medium">Concluído</p>
+          <p class="text-sm font-medium">{{ t.done }}</p>
           <p class="max-w-[28rem] truncate text-xs text-[var(--color-muted)]">{{ fileName(result.output_path) }}</p>
         </div>
 
@@ -136,8 +145,8 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
             <polyline points="17 8 12 3 7 8"/>
             <line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
-          <p class="text-sm font-medium">Arraste um arquivo aqui</p>
-          <p class="text-xs text-[var(--color-muted)]">ou clique para selecionar</p>
+          <p class="text-sm font-medium">{{ t.dropzoneIdle }}</p>
+          <p class="text-xs text-[var(--color-muted)]">{{ t.dropzoneClick }}</p>
         </div>
       </Transition>
     </section>
@@ -156,11 +165,11 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
 
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
-            <div class="text-[11px] uppercase tracking-wider text-[var(--color-muted)]">Original</div>
+            <div class="text-[11px] uppercase tracking-wider text-[var(--color-muted)]">{{ t.original }}</div>
             <div class="mt-0.5 font-medium tabular-nums">{{ fmtBytes(result.original_size) }}</div>
           </div>
           <div>
-            <div class="text-[11px] uppercase tracking-wider text-[var(--color-muted)]">Limpo</div>
+            <div class="text-[11px] uppercase tracking-wider text-[var(--color-muted)]">{{ t.cleaned }}</div>
             <div class="mt-0.5 font-medium tabular-nums text-[var(--color-accent)]">{{ fmtBytes(result.new_size) }}</div>
           </div>
         </div>
@@ -174,9 +183,9 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
         </div>
 
         <div class="flex flex-wrap gap-2">
-          <button @click="openOutput" class="btn-ghost">Abrir</button>
-          <button @click="revealOutput" class="btn-ghost">Mostrar na pasta</button>
-          <button @click="pickFile" class="btn-primary ml-auto">Limpar outro</button>
+          <button @click="openOutput" class="btn-ghost">{{ t.open }}</button>
+          <button @click="revealOutput" class="btn-ghost">{{ t.revealInDir }}</button>
+          <button @click="pickFile" class="btn-primary ml-auto">{{ t.cleanAnother }}</button>
         </div>
       </div>
     </Transition>
@@ -184,7 +193,7 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
     <!-- Error -->
     <Transition name="slide">
       <div v-if="error" class="flex flex-col gap-1 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
-        <strong class="text-xs uppercase tracking-wider">Erro</strong>
+        <strong class="text-xs uppercase tracking-wider">{{ t.error }}</strong>
         <span class="text-[13px]">{{ error }}</span>
       </div>
     </Transition>
@@ -192,7 +201,7 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
     <!-- Footer -->
     <footer class="mt-auto flex items-center justify-center gap-2 pt-4 text-[11px] text-[var(--color-muted)]">
       <span class="h-1.5 w-1.5 rounded-full bg-[var(--color-success)]"></span>
-      JPEG · PNG · WebP · PDF · DOCX · XLSX · PPTX · ODT · EPUB
+      JPEG · PNG · WebP · SVG · PDF · DOCX · XLSX · PPTX · ODT · EPUB
     </footer>
   </main>
 </template>

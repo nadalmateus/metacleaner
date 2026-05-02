@@ -166,12 +166,21 @@ fn clean_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
     doc.trailer.remove(b"Info");
     doc.trailer.remove(b"ID"); // ID do arquivo pode rastrear sess\u{00f5}es
 
-    // 2) Limpa Root/Catalog: XMP, OpenAction (pode revelar plug-ins), MarkInfo, Lang.
+    // 2) Limpa Root/Catalog: XMP, OpenAction, MarkInfo, Lang, EmbeddedFiles, AF (associated files),
+    //    Outlines/Names que podem incluir destinos com autoria, ViewerPreferences customizadas.
     if let Ok(root_ref) = doc.trailer.get(b"Root").and_then(|o| o.as_reference()) {
         if let Ok(Object::Dictionary(dict)) = doc.get_object_mut(root_ref) {
             dict.remove(b"Metadata");
             dict.remove(b"PieceInfo");
-            dict.remove(b"PageLabels"); // r\u{00f3}tulos personalizados \u{00e0}s vezes incluem dados
+            dict.remove(b"PageLabels");
+            dict.remove(b"AF");
+            dict.remove(b"AcroForm"); // formul\u{00e1}rios podem armazenar valores de campos
+            // Remove anexos embutidos via /Names -> /EmbeddedFiles.
+            if let Some(Object::Reference(names_ref)) = dict.get(b"Names").ok().cloned() {
+                if let Ok(Object::Dictionary(ndict)) = doc.get_object_mut(names_ref) {
+                    ndict.remove(b"EmbeddedFiles");
+                }
+            }
         }
     }
 
@@ -185,13 +194,25 @@ fn clean_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
 
-    // 4) Remove PieceInfo/LastModified em qualquer dicion\u{00e1}rio do arquivo.
+    // 4) Remove PieceInfo/LastModified/Metadata em qualquer dicion\u{00e1}rio do arquivo.
+    //    Tamb\u{00e9}m remove anota\u{00e7}\u{00f5}es (/Annots) que armazenam autor (/T) e dados de revis\u{00e3}o.
     let obj_ids: Vec<_> = doc.objects.keys().cloned().collect();
     for id in obj_ids {
         if let Some(Object::Dictionary(dict)) = doc.objects.get_mut(&id) {
             dict.remove(b"PieceInfo");
             dict.remove(b"LastModified");
             dict.remove(b"Metadata");
+            // Em anota\u{00e7}\u{00f5}es PDF, /T = autor, /M = modifica\u{00e7}\u{00e3}o, /CreationDate, /NM = nome\u{00fanico.
+            if let Ok(t) = dict.get(b"Type").and_then(|o| o.as_name()) {
+                if t == b"Annot" {
+                    dict.remove(b"T");
+                    dict.remove(b"M");
+                    dict.remove(b"CreationDate");
+                    dict.remove(b"NM");
+                    dict.remove(b"RC");
+                    dict.remove(b"Subj");
+                }
+            }
         }
     }
 
@@ -364,9 +385,51 @@ fn detect_strategy(ext: &str) -> &'static str {
     match ext {
         "jpg" | "jpeg" | "png" | "webp" => "image",
         "pdf" => "pdf",
+        "svg" => "svg",
         "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" => "zip-office",
         _ => "copy",
     }
+}
+
+/// Verifica se os primeiros bytes batem com a extens\u{00e3}o declarada (anti-spoofing leve).
+fn verify_magic(bytes: &[u8], ext: &str) -> Result<(), String> {
+    let ok = match ext {
+        "jpg" | "jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "png" => bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        "webp" => bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        "pdf" => bytes.starts_with(b"%PDF-"),
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" => {
+            bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) || bytes.starts_with(&[0x50, 0x4B, 0x05, 0x06])
+        }
+        "svg" => true, // texto, validado pelo parser
+        _ => true,
+    };
+    if !ok {
+        return Err(format!("Conte\u{00fa}do n\u{00e3}o corresponde \u{00e0} extens\u{00e3}o .{ext}."));
+    }
+    Ok(())
+}
+
+fn clean_svg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    let text = std::str::from_utf8(bytes).map_err(|_| "SVG n\u{00e3}o UTF-8".to_string())?;
+
+    // Remove blocos <metadata>...</metadata>, <title>, <desc>, <foreignObject>,
+    // coment\u{00e1}rios <!-- ... --> e processing instructions <?xml-stylesheet?>.
+    static BLOCKS: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"(?is)<metadata\b[^>]*>.*?</metadata>|<title\b[^>]*>.*?</title>|<desc\b[^>]*>.*?</desc>|<!--.*?-->|<\?xml-stylesheet[^?]*\?>"#).unwrap()
+    });
+
+    // Atributos sens\u{00edveis} de autoria/edi\u{00e7}\u{00e3}o (Inkscape/Sodipodi/Illustrator).
+    static ATTRS: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"(?i)\s(?:inkscape|sodipodi|i)?:?(?:cx|cy|zoom|pageopacity|pageshadow|window-width|window-height|window-x|window-y|current-layer|docname|version|cy|cx|object-tolerance|guide-tolerance|grid-tolerance|export-filename|export-xdpi|export-ydpi)\s*=\s*"[^"]*""#).unwrap()
+    });
+
+    let cleaned = BLOCKS.replace_all(text, "");
+    let cleaned = ATTRS.replace_all(&cleaned, "");
+    Ok(cleaned.into_owned().into_bytes())
 }
 
 fn process(input: PathBuf) -> Result<CleanResult, String> {
@@ -379,10 +442,12 @@ fn process(input: PathBuf) -> Result<CleanResult, String> {
 
     let bytes = fs::read(&input).map_err(|e| format!("Falha ao ler arquivo: {e}"))?;
     let strategy = detect_strategy(&ext);
+    verify_magic(&bytes, &ext)?;
 
     let cleaned: Vec<u8> = match strategy {
         "image" => clean_image(&bytes, &ext)?,
         "pdf" => clean_pdf(&bytes)?,
+        "svg" => clean_svg(&bytes)?,
         "zip-office" => clean_zip_office(&bytes)?,
         _ => bytes.clone(),
     };
