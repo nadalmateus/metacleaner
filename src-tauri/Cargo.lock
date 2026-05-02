@@ -2082,6 +2082,8 @@ version = "0.1.0"
 dependencies = [
  "img-parts",
  "lopdf",
+ "once_cell",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
