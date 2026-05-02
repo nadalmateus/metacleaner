@@ -13,6 +13,7 @@ interface CleanResult {
   strategy: string;
   original_size: number;
   new_size: number;
+  removed: string[];
 }
 
 const busy = ref(false);
@@ -180,6 +181,20 @@ onUnmounted(() => { if (unlistenDrag) unlistenDrag(); });
 
         <div class="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-1.5 font-mono text-[11px] text-[var(--color-muted)]" :title="result.output_path">
           <div class="truncate">{{ result.output_path }}</div>
+        </div>
+
+        <div class="flex flex-col gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">{{ t.removedTitle }}</span>
+            <span v-if="result.removed.length" class="text-[11px] tabular-nums text-[var(--color-muted)]">{{ t.removedCount(result.removed.length) }}</span>
+          </div>
+          <div v-if="result.removed.length === 0" class="text-[12px] text-[var(--color-muted)] italic">{{ t.removedEmpty }}</div>
+          <ul v-else class="max-h-44 overflow-y-auto pr-1 flex flex-col gap-1">
+            <li v-for="(item, i) in result.removed" :key="i" class="flex items-start gap-2 text-[12px] leading-snug text-[var(--color-text)]">
+              <span class="mt-1 inline-block h-1 w-1 flex-none rounded-full bg-[var(--color-accent)]"></span>
+              <span class="font-mono break-all">{{ item }}</span>
+            </li>
+          </ul>
         </div>
 
         <div class="flex flex-wrap gap-2">

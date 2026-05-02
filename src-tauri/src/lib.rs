@@ -15,6 +15,7 @@ pub struct CleanResult {
     strategy: String,
     original_size: u64,
     new_size: u64,
+    removed: Vec<String>,
 }
 
 // ---------- caminhos ----------
@@ -73,35 +74,45 @@ fn validate_input(path_str: &str) -> Result<(PathBuf, u64), String> {
 
 // ---------- imagens ----------
 
-fn clean_image(bytes: &[u8], ext: &str) -> Result<Vec<u8>, String> {
+fn clean_image(bytes: &[u8], ext: &str) -> Result<(Vec<u8>, Vec<String>), String> {
     use img_parts::{jpeg::Jpeg, png::Png, webp::WebP, ImageEXIF, ImageICC};
 
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut log: Vec<String> = Vec::new();
     match ext {
         "jpg" | "jpeg" => {
             let mut img = Jpeg::from_bytes(bytes.to_vec().into())
                 .map_err(|e| format!("JPEG inv\u{00e1}lido: {e}"))?;
 
-            // Remove EXIF (APP1) e ICC profile (APP2).
+            if img.exif().is_some() {
+                log.push("JPEG: EXIF (APP1)".into());
+            }
+            if img.icc_profile().is_some() {
+                log.push("JPEG: ICC profile (APP2)".into());
+            }
             img.set_exif(None);
             img.set_icc_profile(None);
 
-            // Remove TODOS os segmentos APPn (1..=15) e COM (coment\u{00e1}rios).
-            // APP0 (JFIF) \u{00e9} preservado pois \u{00e9} estrutural.
-            // Remove tamb\u{00e9}m XMP (APP1 com identificador "http://ns.adobe.com/xap/"),
-            // IPTC/Photoshop (APP13), Adobe (APP14), Ducky (APP12), JPEG-XT.
             img.segments_mut().retain(|seg| {
                 let m = seg.marker();
-                // JFIF \u{00e9} APP0 (0xE0). Quadros essenciais (SOF, SOS, DQT, DHT, DRI, EOI, SOI, RST*) ficam.
-                // 0xE0..=0xEF s\u{00e3}o APPn. 0xFE \u{00e9} COM.
                 if m == 0xE0 {
                     return true; // mant\u{00e9}m JFIF
                 }
                 if (0xE1..=0xEF).contains(&m) {
-                    return false; // remove demais APPn
+                    let label = match m {
+                        0xE1 => "APP1 (EXIF/XMP)",
+                        0xE2 => "APP2 (ICC/FlashPix)",
+                        0xEC => "APP12 (Picture Info)",
+                        0xED => "APP13 (Photoshop/IPTC)",
+                        0xEE => "APP14 (Adobe)",
+                        _ => "APPn",
+                    };
+                    log.push(format!("JPEG: segmento {label}"));
+                    return false;
                 }
                 if m == 0xFE {
-                    return false; // remove COM
+                    log.push("JPEG: coment\u{00e1}rio (COM)".into());
+                    return false;
                 }
                 true
             });
@@ -113,18 +124,26 @@ fn clean_image(bytes: &[u8], ext: &str) -> Result<Vec<u8>, String> {
         "png" => {
             let mut img = Png::from_bytes(bytes.to_vec().into())
                 .map_err(|e| format!("PNG inv\u{00e1}lido: {e}"))?;
+            if img.exif().is_some() {
+                log.push("PNG: eXIf chunk".into());
+            }
+            if img.icc_profile().is_some() {
+                log.push("PNG: iCCP (ICC profile)".into());
+            }
             img.set_exif(None);
             img.set_icc_profile(None);
 
-            // Remove todo chunk auxiliar que possa carregar metadados ou identifica\u{00e7}\u{00e3}o:
-            // texto (tEXt/iTXt/zTXt), tempo (tIME), EXIF (eXIf), perfil de cor adicional (sPLT, hIST).
-            // Mant\u{00e9}m chunks essenciais para renderiza\u{00e7}\u{00e3}o (IHDR, IDAT, IEND, PLTE, tRNS, gAMA, cHRM, sRGB, sBIT, bKGD, pHYs).
             img.chunks_mut().retain(|c| {
                 let t = c.kind();
-                !matches!(
+                let drop = matches!(
                     &t,
                     b"tEXt" | b"iTXt" | b"zTXt" | b"tIME" | b"eXIf" | b"sPLT" | b"hIST"
-                )
+                );
+                if drop {
+                    let name = std::str::from_utf8(&t).unwrap_or("????");
+                    log.push(format!("PNG: chunk {name}"));
+                }
+                !drop
             });
             img.encoder()
                 .write_to(&mut out)
@@ -133,12 +152,22 @@ fn clean_image(bytes: &[u8], ext: &str) -> Result<Vec<u8>, String> {
         "webp" => {
             let mut img = WebP::from_bytes(bytes.to_vec().into())
                 .map_err(|e| format!("WebP inv\u{00e1}lido: {e}"))?;
+            if img.exif().is_some() {
+                log.push("WebP: EXIF".into());
+            }
+            if img.icc_profile().is_some() {
+                log.push("WebP: ICCP".into());
+            }
             img.set_exif(None);
             img.set_icc_profile(None);
-            // Remove EXIF/XMP/ICCP independentemente do helper acima.
             img.chunks_mut().retain(|c| {
                 let id = c.id();
-                !matches!(&id, b"XMP " | b"EXIF" | b"ICCP")
+                let drop = matches!(&id, b"XMP " | b"EXIF" | b"ICCP");
+                if drop {
+                    let name = std::str::from_utf8(&id).unwrap_or("????");
+                    log.push(format!("WebP: chunk {}", name.trim()));
+                }
+                !drop
             });
             img.encoder()
                 .write_to(&mut out)
@@ -146,38 +175,90 @@ fn clean_image(bytes: &[u8], ext: &str) -> Result<Vec<u8>, String> {
         }
         _ => return Err(format!("Formato de imagem n\u{00e3}o suportado: {ext}")),
     }
-    Ok(out)
+    Ok((out, log))
 }
 
 // ---------- PDF ----------
 
-fn clean_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn clean_pdf(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
     use lopdf::{Dictionary, Document, Object};
 
     let mut doc = Document::load_mem(bytes).map_err(|e| format!("PDF inv\u{00e1}lido: {e}"))?;
+    let mut log: Vec<String> = Vec::new();
 
     // 1) Esvazia o objeto Info e remove ref do trailer.
     if let Ok(info_obj) = doc.trailer.get(b"Info").cloned() {
         if let Ok(info_ref) = info_obj.as_reference() {
+            if let Ok(Object::Dictionary(info_dict)) = doc.get_object(info_ref) {
+                let known: &[&[u8]] = &[
+                    b"Title",
+                    b"Author",
+                    b"Subject",
+                    b"Keywords",
+                    b"Creator",
+                    b"Producer",
+                    b"CreationDate",
+                    b"ModDate",
+                    b"Trapped",
+                ];
+                for key in known {
+                    if info_dict.has(*key) {
+                        log.push(format!(
+                            "PDF: /Info /{}",
+                            std::str::from_utf8(key).unwrap_or("?")
+                        ));
+                    }
+                }
+                // Chaves customizadas (algumas ferramentas adicionam SourceModified, GTS_PDFXVersion etc.)
+                for (k, _) in info_dict.iter() {
+                    if !known.iter().any(|kk| *kk == k.as_slice()) {
+                        log.push(format!(
+                            "PDF: /Info /{}",
+                            std::str::from_utf8(k).unwrap_or("?")
+                        ));
+                    }
+                }
+            }
             doc.objects
                 .insert(info_ref, Object::Dictionary(Dictionary::new()));
         }
     }
+    if doc.trailer.has(b"Info") {
+        log.push("PDF: trailer /Info".into());
+    }
+    if doc.trailer.has(b"ID") {
+        log.push("PDF: trailer /ID".into());
+    }
     doc.trailer.remove(b"Info");
-    doc.trailer.remove(b"ID"); // ID do arquivo pode rastrear sess\u{00f5}es
+    doc.trailer.remove(b"ID");
 
-    // 2) Limpa Root/Catalog: XMP, OpenAction, MarkInfo, Lang, EmbeddedFiles, AF (associated files),
-    //    Outlines/Names que podem incluir destinos com autoria, ViewerPreferences customizadas.
+    // 2) Limpa Root/Catalog.
     if let Ok(root_ref) = doc.trailer.get(b"Root").and_then(|o| o.as_reference()) {
         if let Ok(Object::Dictionary(dict)) = doc.get_object_mut(root_ref) {
+            for key in &[
+                &b"Metadata"[..],
+                &b"PieceInfo"[..],
+                &b"PageLabels"[..],
+                &b"AF"[..],
+                &b"AcroForm"[..],
+            ] {
+                if dict.has(*key) {
+                    log.push(format!(
+                        "PDF: Catalog /{}",
+                        std::str::from_utf8(key).unwrap_or("?")
+                    ));
+                }
+            }
             dict.remove(b"Metadata");
             dict.remove(b"PieceInfo");
             dict.remove(b"PageLabels");
             dict.remove(b"AF");
-            dict.remove(b"AcroForm"); // formul\u{00e1}rios podem armazenar valores de campos
-            // Remove anexos embutidos via /Names -> /EmbeddedFiles.
+            dict.remove(b"AcroForm");
             if let Some(Object::Reference(names_ref)) = dict.get(b"Names").ok().cloned() {
                 if let Ok(Object::Dictionary(ndict)) = doc.get_object_mut(names_ref) {
+                    if ndict.has(b"EmbeddedFiles") {
+                        log.push("PDF: /Names /EmbeddedFiles".into());
+                    }
                     ndict.remove(b"EmbeddedFiles");
                 }
             }
@@ -185,26 +266,44 @@ fn clean_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     // 3) Remove /Metadata em todas as p\u{00e1}ginas.
+    let mut page_meta_count = 0usize;
     let page_ids: Vec<_> = doc.get_pages().values().cloned().collect();
     for page_id in page_ids {
         if let Ok(Object::Dictionary(dict)) = doc.get_object_mut(page_id) {
+            if dict.has(b"Metadata") || dict.has(b"PieceInfo") || dict.has(b"LastModified") {
+                page_meta_count += 1;
+            }
             dict.remove(b"Metadata");
             dict.remove(b"PieceInfo");
             dict.remove(b"LastModified");
         }
     }
+    if page_meta_count > 0 {
+        log.push(format!("PDF: metadados em {page_meta_count} p\u{00e1}gina(s)"));
+    }
 
-    // 4) Remove PieceInfo/LastModified/Metadata em qualquer dicion\u{00e1}rio do arquivo.
-    //    Tamb\u{00e9}m remove anota\u{00e7}\u{00f5}es (/Annots) que armazenam autor (/T) e dados de revis\u{00e3}o.
+    // 4) Remove em qualquer dicion\u{00e1}rio.
+    let mut annot_count = 0usize;
+    let mut piece_count = 0usize;
     let obj_ids: Vec<_> = doc.objects.keys().cloned().collect();
     for id in obj_ids {
         if let Some(Object::Dictionary(dict)) = doc.objects.get_mut(&id) {
+            if dict.has(b"PieceInfo") || dict.has(b"LastModified") || dict.has(b"Metadata") {
+                piece_count += 1;
+            }
             dict.remove(b"PieceInfo");
             dict.remove(b"LastModified");
             dict.remove(b"Metadata");
-            // Em anota\u{00e7}\u{00f5}es PDF, /T = autor, /M = modifica\u{00e7}\u{00e3}o, /CreationDate, /NM = nome\u{00fanico.
             if let Ok(t) = dict.get(b"Type").and_then(|o| o.as_name()) {
-                if t == b"Annot" {
+                if t == b"Annot"
+                    && (dict.has(b"T")
+                        || dict.has(b"M")
+                        || dict.has(b"CreationDate")
+                        || dict.has(b"NM")
+                        || dict.has(b"RC")
+                        || dict.has(b"Subj"))
+                {
+                    annot_count += 1;
                     dict.remove(b"T");
                     dict.remove(b"M");
                     dict.remove(b"CreationDate");
@@ -215,15 +314,25 @@ fn clean_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
             }
         }
     }
+    if piece_count > 0 {
+        log.push(format!(
+            "PDF: PieceInfo/LastModified em {piece_count} objeto(s)"
+        ));
+    }
+    if annot_count > 0 {
+        log.push(format!(
+            "PDF: autoria/data em {annot_count} anota\u{00e7}\u{00f5}es"
+        ));
+    }
 
-    // 5) Compacta e poda objetos n\u{00e3}o referenciados (remove restos de sess\u{00f5}es).
+    // 5) Compacta e poda objetos n\u{00e3}o referenciados.
     doc.prune_objects();
     doc.compress();
 
     let mut out = Vec::new();
     doc.save_to(&mut out)
         .map_err(|e| format!("Falha ao salvar PDF: {e}"))?;
-    Ok(out)
+    Ok((out, log))
 }
 
 // ---------- Office / ODF / EPUB ----------
@@ -287,7 +396,7 @@ fn scrub_xml(input: &str) -> String {
     s3.into_owned()
 }
 
-fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn clean_zip_office(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
     use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
     let reader = Cursor::new(bytes);
@@ -300,6 +409,9 @@ fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
         ));
     }
 
+    let mut log: Vec<String> = Vec::new();
+    let mut scrubbed_count = 0usize;
+
     let mut buf = Vec::with_capacity(bytes.len());
     let mut total_uncompressed: u64 = 0;
     {
@@ -308,24 +420,22 @@ fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            // Mitiga\u{00e7}\u{00e3}o zip-slip: rejeita nomes com path traversal ou absolutos.
             let safe_name = match file.enclosed_name() {
                 Some(p) => p.to_string_lossy().replace('\\', "/"),
-                None => continue, // entrada suspeita: pula
+                None => continue,
             };
             let lower = safe_name.to_ascii_lowercase();
 
-            // Mitiga\u{00e7}\u{00e3}o zip-bomb: limite de descompress\u{00e3}o cumulativa.
             total_uncompressed = total_uncompressed.saturating_add(file.size());
             if total_uncompressed > MAX_OUTPUT_BYTES {
                 return Err("ZIP excede limite de descompress\u{00e3}o.".into());
             }
 
-            // Thumbnails carregam preview com poss\u{00edveis} dados sens\u{00edveis}: drop.
             let drop = lower.starts_with("docprops/thumbnail")
                 || lower == "thumbnails/thumbnail.png"
                 || lower == "thumbnails/thumbnail.jpeg";
             if drop {
+                log.push(format!("Office: removido {safe_name}"));
                 continue;
             }
 
@@ -345,6 +455,7 @@ fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
                     .add_directory(&safe_name, options)
                     .map_err(|e| e.to_string())?;
             } else if let Some(content) = replacement {
+                log.push(format!("Office: zerado {safe_name}"));
                 writer
                     .start_file(&safe_name, options)
                     .map_err(|e| e.to_string())?;
@@ -362,6 +473,9 @@ fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 if is_xmlish {
                     if let Ok(text) = std::str::from_utf8(&data) {
                         let scrubbed = scrub_xml(text);
+                        if scrubbed.len() != text.len() || scrubbed != text {
+                            scrubbed_count += 1;
+                        }
                         writer
                             .write_all(scrubbed.as_bytes())
                             .map_err(|e| e.to_string())?;
@@ -376,7 +490,12 @@ fn clean_zip_office(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
         writer.finish().map_err(|e| e.to_string())?;
     }
-    Ok(buf)
+    if scrubbed_count > 0 {
+        log.push(format!(
+            "Office: autoria/rsid em {scrubbed_count} XML(s) internos"
+        ));
+    }
+    Ok((buf, log))
 }
 
 // ---------- pipeline ----------
@@ -410,26 +529,61 @@ fn verify_magic(bytes: &[u8], ext: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn clean_svg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn clean_svg(bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
     use once_cell::sync::Lazy;
     use regex::Regex;
 
     let text = std::str::from_utf8(bytes).map_err(|_| "SVG n\u{00e3}o UTF-8".to_string())?;
+    let mut log: Vec<String> = Vec::new();
 
-    // Remove blocos <metadata>...</metadata>, <title>, <desc>, <foreignObject>,
-    // coment\u{00e1}rios <!-- ... --> e processing instructions <?xml-stylesheet?>.
-    static BLOCKS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?is)<metadata\b[^>]*>.*?</metadata>|<title\b[^>]*>.*?</title>|<desc\b[^>]*>.*?</desc>|<!--.*?-->|<\?xml-stylesheet[^?]*\?>"#).unwrap()
-    });
-
-    // Atributos sens\u{00edveis} de autoria/edi\u{00e7}\u{00e3}o (Inkscape/Sodipodi/Illustrator).
+    static METADATA: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?is)<metadata\b[^>]*>.*?</metadata>"#).unwrap());
+    static TITLE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?is)<title\b[^>]*>.*?</title>"#).unwrap());
+    static DESC: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?is)<desc\b[^>]*>.*?</desc>"#).unwrap());
+    static COMMENTS: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?is)<!--.*?-->"#).unwrap());
+    static PI: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?is)<\?xml-stylesheet[^?]*\?>"#).unwrap());
     static ATTRS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)\s(?:inkscape|sodipodi|i)?:?(?:cx|cy|zoom|pageopacity|pageshadow|window-width|window-height|window-x|window-y|current-layer|docname|version|cy|cx|object-tolerance|guide-tolerance|grid-tolerance|export-filename|export-xdpi|export-ydpi)\s*=\s*"[^"]*""#).unwrap()
+        Regex::new(r#"(?i)\s(?:inkscape|sodipodi):[A-Za-z\-]+\s*=\s*"[^"]*""#).unwrap()
     });
 
-    let cleaned = BLOCKS.replace_all(text, "");
-    let cleaned = ATTRS.replace_all(&cleaned, "");
-    Ok(cleaned.into_owned().into_bytes())
+    let mut s = text.to_string();
+    let n = METADATA.find_iter(&s).count();
+    if n > 0 {
+        log.push(format!("SVG: {n} bloco(s) <metadata>"));
+    }
+    s = METADATA.replace_all(&s, "").into_owned();
+
+    let n = TITLE.find_iter(&s).count();
+    if n > 0 {
+        log.push(format!("SVG: {n} <title>"));
+    }
+    s = TITLE.replace_all(&s, "").into_owned();
+
+    let n = DESC.find_iter(&s).count();
+    if n > 0 {
+        log.push(format!("SVG: {n} <desc>"));
+    }
+    s = DESC.replace_all(&s, "").into_owned();
+
+    let n = COMMENTS.find_iter(&s).count();
+    if n > 0 {
+        log.push(format!("SVG: {n} coment\u{00e1}rio(s)"));
+    }
+    s = COMMENTS.replace_all(&s, "").into_owned();
+
+    s = PI.replace_all(&s, "").into_owned();
+
+    let n = ATTRS.find_iter(&s).count();
+    if n > 0 {
+        log.push(format!(
+            "SVG: {n} atributo(s) Inkscape/Sodipodi"
+        ));
+    }
+    s = ATTRS.replace_all(&s, "").into_owned();
+
+    Ok((s.into_bytes(), log))
 }
 
 fn process(input: PathBuf) -> Result<CleanResult, String> {
@@ -444,12 +598,12 @@ fn process(input: PathBuf) -> Result<CleanResult, String> {
     let strategy = detect_strategy(&ext);
     verify_magic(&bytes, &ext)?;
 
-    let cleaned: Vec<u8> = match strategy {
+    let (cleaned, removed): (Vec<u8>, Vec<String>) = match strategy {
         "image" => clean_image(&bytes, &ext)?,
         "pdf" => clean_pdf(&bytes)?,
         "svg" => clean_svg(&bytes)?,
         "zip-office" => clean_zip_office(&bytes)?,
-        _ => bytes.clone(),
+        _ => (bytes.clone(), vec!["Cópia binária (formato sem suporte de limpeza).".into()]),
     };
 
     if cleaned.len() as u64 > MAX_OUTPUT_BYTES {
@@ -457,7 +611,6 @@ fn process(input: PathBuf) -> Result<CleanResult, String> {
     }
 
     let out_path = unique_output_path(&input);
-    // Escrita at\u{00f4mica: tmp \u{2192} rename, evita corromper se o processo morrer.
     let tmp_path = out_path.with_extension(format!(
         "{}.part",
         out_path.extension().and_then(|s| s.to_str()).unwrap_or("tmp")
@@ -470,6 +623,7 @@ fn process(input: PathBuf) -> Result<CleanResult, String> {
         strategy: strategy.to_string(),
         original_size,
         new_size: cleaned.len() as u64,
+        removed,
     })
 }
 

@@ -16,6 +16,9 @@ const messages = {
     revealInDir: "Mostrar na pasta",
     cleanAnother: "Limpar outro",
     error: "Erro",
+    removedTitle: "O que foi removido",
+    removedEmpty: "Nada de identificável foi encontrado neste arquivo.",
+    removedCount: (n: number) => `${n} ${n === 1 ? "item removido" : "itens removidos"}`,
     strategy: {
       image: "Imagem",
       pdf: "PDF",
@@ -38,6 +41,9 @@ const messages = {
     revealInDir: "Show in folder",
     cleanAnother: "Clean another",
     error: "Error",
+    removedTitle: "What was removed",
+    removedEmpty: "No identifying data was found in this file.",
+    removedCount: (n: number) => `${n} ${n === 1 ? "item removed" : "items removed"}`,
     strategy: {
       image: "Image",
       pdf: "PDF",
